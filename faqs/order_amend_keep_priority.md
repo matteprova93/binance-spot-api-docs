@@ -1,114 +1,71 @@
-# Order Amend Keep Priority
+import time
+import pandas as pd
+from binance.client import Client
+from ta.momentum import RSIIndicator
+from binance.enums import *
 
-**Disclaimer**:
+# === CONFIGURAZIONE TESTNET ===
+API_KEY = 'la_tua_testnet_api_key'
+API_SECRET = 'la_tua_testnet_api_secret'
 
-* The symbols and values used here are fictional and do not imply anything about the actual setup on the live exchange.
-* For simplicity, the examples in this document do not include commission.
+client = Client(API_KEY, API_SECRET)
+client.API_URL = 'https://testnet.binance.vision/api'
 
-## What is Order Amend Keep Priority?
+# === PARAMETRI BOT ===
+symbol = 'BTCUSDT'
+interval = '1m'
+quantity = 0.001
+rsi_buy = 30
+rsi_sell = 70
 
-Order Amend Keep Priority request is used to modify (amend) an existing order **without losing order book priority**.
+def get_klines(symbol, interval, limit=100):
+    klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+    df = pd.DataFrame(klines, columns=[
+        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+        'close_time', 'quote_asset_volume', 'number_of_trades',
+        'taker_buy_base', 'taker_buy_quote', 'ignore'
+    ])
+    df['close'] = df['close'].astype(float)
+    return df
 
-The following order modifications are allowed:
+def get_rsi(df, period=14):
+    rsi = RSIIndicator(close=df['close'], window=period)
+    df['rsi'] = rsi.rsi()
+    return df
 
-* reduce the quantity of the order
+def place_order(order_type):
+    try:
+        if order_type == 'buy':
+            order = client.order_market_buy(symbol=symbol, quantity=quantity)
+            print("ORDINE BUY ESEGUITO:", order)
+        elif order_type == 'sell':
+            order = client.order_market_sell(symbol=symbol, quantity=quantity)
+            print("ORDINE SELL ESEGUITO:", order)
+    except Exception as e:
+        print("Errore ordine:", e)
 
-## How can I amend the quantity of my order?
+def run_bot():
+    bought = False
+    print("Saldo iniziale USDT:", client.get_asset_balance(asset='USDT'))
+    while True:
+        try:
+            df = get_klines(symbol, interval)
+            df = get_rsi(df)
+            latest_rsi = df['rsi'].iloc[-1]
+            print(f"[RSI: {latest_rsi:.2f}] Stato: {'IN POSIZIONE' if bought else 'PRONTO'}")
 
-Use the following requests:
+            if latest_rsi < rsi_buy and not bought:
+                place_order('buy')
+                bought = True
 
-| API | Request |
-| :---- | :---- |
-| REST API | `PUT /api/v3/order/amend/keepPriority` |
-| WebSocket API | `order.amend.keepPriority` |
-| FIX API | OrderAmendKeepPriorityRequest `<XAK>` |
+            elif latest_rsi > rsi_sell and bought:
+                place_order('sell')
+                bought = False
 
-## What is the difference between "Cancel an Existing Order and Send a New Order" (cancel-replace) and "Order Amend Keep Priority"?
+            time.sleep(60)
 
-**Cancel an Existing Order and Send a New Order** request cancels the old order and places a new order.<br> Time priority is lost. The new order executes after existing orders at the same price.
+        except Exception as e:
+            print("Errore bot:", e)
+            time.sleep(60)
 
-**Order Amend Keep Priority** request modifies an existing order in-place. <br>The amended order keeps its time priority among existing orders at the same price.
-
-For example, consider the following order book:
-
-| User | Order ID | Side | Order price | quantity |
-| :---- | ----: | :---- | ----: | ----: |
-| User A | 10 | BUY | 87,000 | 1.00 |
-| ⭐️ YOU | 15 | BUY | 87,000 | 5.50 |
-| User B | 20 | BUY | 87,000 | 4.00 |
-| User C | 21 | BUY | 86,999 | 2.00 |
-
-Your order 15 is the second one in the queue based on price and time.
-
-You want to reduce the quantity from 5.50 down to 5.00.
-
-If you use **cancel-replace** to cancel `orderId=15` and place a new order with `qty=5.00`, the order book will look like this:
-
-| User | Order ID | Side | Order price | quantity |
-| :---- | ----: | :---- | ----: | ----: |
-| User A | 10 | BUY | 87,000 | 1.00 |
-| ~~⭐️ YOU~~ | ~~11~~ | ~~BUY~~ | ~~87,000~~ | ~~5.50~~ |
-| User B | 20 | BUY | 87,000 | 4.00 |
-| ⭐️ YOU | (new) 22 | BUY | 87,000 | 5.00 |
-| User C | 21 | BUY | 86,999 | 2.00 |
-
-Note that the new order gets a new order ID and you lose time priority: order 22 will trade after the order 20\.
-
-If instead you use **Order Amend Keep Priority** to reduce the quantity of `orderId=15` down to `qty=5.00`, the order book will look like this:
-
-| User | Order ID | Side | Order price | quantity |
-| :---- | ----: | :---- | ----: | ----: |
-| User A | 10 | BUY | 87,000 | 1.00 |
-| ⭐️ YOU | 15 | BUY | 87,000 | (amended) **5.00** |
-| User B | 20 | BUY | 87,000 | 4.00 |
-| User C | 21 | BUY | 86,999 | 2.00 |
-
-Note that the order ID stays the same and the order keeps its priority in the queue. Only the quantity of the order changes.
-
-## Does Order Amend Keep Priority affect unfilled order count (rate limits)?
-
-Currently, Order Amend Keep Priority requests charge 0 for unfilled order count.
-
-## How do I know if my order has been amended?
-
-If the order was amended successfully, the API response contains your order with the updated quantity.
-
-On User Data Stream, you will receive an `"executionReport"` event with execution type `"x": "REPLACED"`.
-
-If the amended order belongs to an order list and the client order ID has changed, you will also receive a "listStatus" event with list status type `"l": "UPDATED"`.
-
-You can also use the following requests to query order modification history:
-
-| API | Request |
-| :---- | :---- |
-| REST API | `GET /api/v3/order/amendments` |
-| WebSocket API | `order.amendments` |
-
-## What happens if my amend request does not succeed?
-
-If the request fails for any reason (e.g. fails the filters, permissions, account restrictions, etc), then the order amend request is rejected and the order remains unchanged.
-
-## Is it possible to reuse the current clientOrderId for my amended order?
-
-Yes.
-
-By default, amended orders get a random new client order ID, but you can pass the current client order ID in the `newClientOrderId` parameter if you wish to keep it.
-
-## Can Iceberg Orders be amended?
-
-Yes.
-
-Note that an iceberg order's visible quantity will only change if `newQty` is below the pre-amended visible quantity.
-
-## Can Order lists be amended?
-
-Orders in an order list can be amended.
-
-Note that OCO order pairs must have the same quantity, since only one of the orders can ever be executed. This means that amending either order affects both orders.
-
-For OTO orders, the working and pending orders can be amended individually.
-
-## Which symbols allow Order Amend Keep Priority?
-
-This information is available in Exchange Information.
-Symbols that allow Order Amend Keep Priority requests have `amendAllowed` set to `true`.
+run_bot()
